@@ -769,7 +769,7 @@ class frontend_testgen {
         {
             printf("Now generating test file, alpha is %lf\n", this->alpha);
             auto test_ops =
-                generate_tasks(this->pos, test_n, false, this->alpha, this->bias);
+                generate_tasks(this->pos, test_n, true, this->alpha, this->bias);
             write_ops_to_file(test_file, make_slice(test_ops));
         }
     }
