@@ -712,17 +712,19 @@ class frontend_testgen {
     int init_n, test_n;
     sequence<double> pos;
     int bias;
+    double alpha;
     string init_file;
     string test_file;
     batch_parallel_oracle oracle;
     int execute_batch_size;
 
-    frontend_testgen(int _init_n, int _test_n, sequence<double> _pos, int _bias,
+    frontend_testgen(int _init_n, int _test_n, sequence<double> _pos, int _bias, double _alpha,
                      string initfile, string testfile, int batch_size)
         : init_n{_init_n},
           test_n{_test_n},
           pos{_pos},
           bias{_bias},
+          alpha{_alpha},
           init_file{initfile},
           test_file{testfile},
           execute_batch_size{batch_size} {}
@@ -765,8 +767,9 @@ class frontend_testgen {
     void write_file() {
         { write_init_file(this->init_file); }
         {
+            printf("Now generating test file, alpha is %lf\n", this->alpha);
             auto test_ops =
-                generate_tasks(this->pos, test_n, false, 0.0, this->bias);
+                generate_tasks(this->pos, test_n, false, this->alpha, this->bias);
             write_ops_to_file(test_file, make_slice(test_ops));
         }
     }
@@ -1155,7 +1158,7 @@ class driver {
         if (program.is_used("--generate_all_test_cases") == true) {
             cout << "start generating all tests" << endl;
             string init_file = program.get<string>("--generate_all_test_cases");
-            frontend_testgen frontend(init_n, test_n, move(pos), bias,
+            frontend_testgen frontend(init_n, test_n, move(pos), bias, alpha,
                                       init_file, "", output_batch_size);
             frontend.generate_all_test();
         } else if (files.size() > 0) {  // test from file
@@ -1177,7 +1180,7 @@ class driver {
             }
             printf("\n");
 
-            frontend_testgen frontend(init_n, test_n, move(pos), bias,
+            frontend_testgen frontend(init_n, test_n, move(pos), bias, alpha,
                                       output_file[0], output_file[1],
                                       output_batch_size);
             frontend.write_file();
