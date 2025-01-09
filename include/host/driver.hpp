@@ -439,9 +439,9 @@ bool load_one_batch(parlay::slice<operation*, operation*> ops,
                 c[j] = sums[j][i] + op_count[j];
             }
             for (size_t j = s; j < e; j++) {
-                
+
                 operation t = mixed_op_batch[j];
-                
+
                 operation_t& operation_type = t.type;
                 int x = (int)operation_type;
                 switch (operation_type) {
@@ -1047,13 +1047,13 @@ class driver {
 
     static void init() {
         rn_gen::init();
-        init_io_managers();
+        //init_io_managers();
     }
 
     static void run(frontend& f, int init_batch_size, int test_batch_size) {
         pim_skip_list_drivers = new pim_skip_list[core::num_top_level_threads];
         pim_skip_list_drivers[0].init();
-        
+
         {
             auto init_ops = f.init_tasks();
             cpu_coverage_timer->reset();
