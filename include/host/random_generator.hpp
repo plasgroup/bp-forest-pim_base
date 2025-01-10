@@ -24,8 +24,8 @@ class rn_gen {
     }
 
     static void init() {
-        srand(time(NULL));
-        // srand(137);
+        // srand(time(NULL));
+        srand(137);
 
         int thread_num = parlay::num_workers();
         cout<<"rand init: tn = " << thread_num << endl;
@@ -47,5 +47,5 @@ class rn_gen {
 
    private:
     size_t state = 0;
-    
+
 };
