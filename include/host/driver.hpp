@@ -236,6 +236,9 @@ void update(slice<update_operation*, update_operation*> ops,
 void scan(slice<scan_operation*, scan_operation*> ops, unique_lock<mutex>& mut, int tid = 0,
           bool reset_len=false, int64_t expected_length = 100, uint64_t dataset_size=500000000) {
     pim_skip_list* ds = &pim_skip_list_drivers[tid];
+#ifndef REDUCE_SCAN_BATCH
+    printf("scan ops = %d\n", ops.size());
+#endif // REDUCE_SCAN_BATCH
     if(reset_len) {
         int64_t range_size;
         if(check_result)
@@ -483,21 +486,25 @@ bool load_one_batch(parlay::slice<operation*, operation*> ops,
 }
 
 operation_t batch_ready(int execute_batch_size) {
+#ifdef REDUCE_SCAN_BATCH
     int scan_execute_batch_size = execute_batch_size / 100;
+#endif // REDUCE_SCAN_BATCH
     for (int j = 1; j < OPERATION_NR_ITEMS; j++) {
         if (op_count[j] >= execute_batch_size && op_count[j] > 0) {
             return (operation_t)j;
         }
     }
+#ifdef REDUCE_SCAN_BATCH
     if (op_count[operation_t::scan_t] >= scan_execute_batch_size && op_count[operation_t::scan_t] > 0) {
         return operation_t::scan_t;
     }
+#endif /* REDUCE_SCAN_BATCH */
     return operation_t::empty_t;
 }
 
 int scan_start = 0;
 
-void run_batch(operation_t op_type, unique_lock<mutex>& mut, int tid) {
+void run_batch(operation_t op_type, unique_lock<mutex>& mut, int tid, int scan_batch_size) {
     int count = op_count[(int)op_type];
     if(op_type != operation_t::scan_t)
         op_count[(int)op_type] = 0;
@@ -518,7 +525,7 @@ void run_batch(operation_t op_type, unique_lock<mutex>& mut, int tid) {
             break;
         }
         case operation_t::scan_t: {
-            int scan_batch = 10000;
+            int scan_batch = scan_batch_size;
             if (count - scan_start >= scan_batch) {
                 core::scan(parlay::make_slice(scan_ops + scan_start, scan_ops + scan_start + scan_batch), mut, tid);
                 scan_start += scan_batch;
@@ -596,7 +603,11 @@ void execute(parlay::slice<operation*, operation*> ops, int load_batch_size,
                         if (op_type == operation_t::empty_t) {
                             break; // !next_batch
                         }
-                        run_batch(op_type, lock, tid);  // may unlock here
+#ifdef REDUCE_SCAN_BATCH
+                        run_batch(op_type, lock, tid, 10000);  // may unlock here
+#else // REDUCE_SCAN_BATCH
+                        run_batch(op_type, lock, tid, execute_batch_size);  // may unlock here
+#endif REDUCE_SCAN_BATCH
                     }
                 }
                 cout << tid << "*****!!! finished" << endl;
