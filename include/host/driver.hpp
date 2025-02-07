@@ -482,8 +482,8 @@ bool load_one_batch(parlay::slice<operation*, operation*> ops,
     return true;
 }
 
-operation_t batch_ready(int execute_batch_size) {
-    int scan_execute_batch_size = execute_batch_size / 100;
+operation_t batch_ready(int execute_batch_size, int scan_scaledown_factor) {
+    int scan_execute_batch_size = execute_batch_size / scan_scaledown_factor;
     for (int j = 1; j < OPERATION_NR_ITEMS; j++) {
         if (op_count[j] >= execute_batch_size && op_count[j] > 0) {
             return (operation_t)j;
@@ -497,7 +497,7 @@ operation_t batch_ready(int execute_batch_size) {
 
 int scan_start = 0;
 
-void run_batch(operation_t op_type, unique_lock<mutex>& mut, int tid) {
+void run_batch(operation_t op_type, unique_lock<mutex>& mut, int tid, int scan_batch_limit) {
     int count = op_count[(int)op_type];
     if(op_type != operation_t::scan_t)
         op_count[(int)op_type] = 0;
@@ -518,16 +518,18 @@ void run_batch(operation_t op_type, unique_lock<mutex>& mut, int tid) {
             break;
         }
         case operation_t::scan_t: {
-            int scan_batch = 10000;
+            int scan_batch = scan_batch_limit;
             if (count - scan_start >= scan_batch) {
                 core::scan(parlay::make_slice(scan_ops + scan_start, scan_ops + scan_start + scan_batch), mut, tid);
                 scan_start += scan_batch;
             } else if(count - scan_start > 1) {
-                parlay::parallel_for(0, count - scan_start, [&](size_t i) {
-                    scan_ops[i] = scan_ops[i + scan_start];
-                });
-                op_count[(int)op_type] = count - scan_start;
-                scan_start = 0;
+                if (scan_start > 0) {
+                    parlay::parallel_for(0, count - scan_start, [&](size_t i) {
+                        scan_ops[i] = scan_ops[i + scan_start];
+                    });
+                    op_count[(int)op_type] = count - scan_start;
+                    scan_start = 0;
+                }
                 core::scan(parlay::make_slice(scan_ops, scan_ops + op_count[(int)op_type]), mut, tid);
                 op_count[(int)op_type] = 0;
             }
@@ -561,7 +563,7 @@ bool finished() {
 }
 
 void execute(parlay::slice<operation*, operation*> ops, int load_batch_size,
-             int execute_batch_size, int threads) {
+             int execute_batch_size, int threads, int scan_scaledown_factor) {
     printf("execute n=%lu batchsize=%d,%d\n", ops.size(), load_batch_size,
            execute_batch_size);
     ASSERT(threads <= num_top_level_threads);
@@ -582,12 +584,12 @@ void execute(parlay::slice<operation*, operation*> ops, int load_batch_size,
                         time_start("load batch");
                         operation_t op_type = operation_t::empty_t;
                         while (true) {
-                            op_type = batch_ready(execute_batch_size);
+                            op_type = batch_ready(execute_batch_size, scan_scaledown_factor);
                             if (op_type != operation_t::empty_t) break;
                             bool next_batch =
                                 load_one_batch(ops, load_batch_size);
                             if (!next_batch) {
-                                op_type = batch_ready(1); // finish remaining tasks
+                                op_type = batch_ready(1, scan_scaledown_factor); // finish remaining tasks
                                 break;
                             }
                         }
@@ -596,7 +598,11 @@ void execute(parlay::slice<operation*, operation*> ops, int load_batch_size,
                         if (op_type == operation_t::empty_t) {
                             break; // !next_batch
                         }
-                        run_batch(op_type, lock, tid);  // may unlock here
+                        if (scan_scaledown_factor == 0)
+                            // Run the entire scan batch at once. Carry over + loaded in this time < 2 * load_batch_size
+                            run_batch(op_type, lock, tid, 2 * load_batch_size);  // may unlock here
+                        else
+                            run_batch(op_type, lock, tid, execute_batch_size / scan_scaledown_factor);  // may unlock here
                     }
                 }
                 cout << tid << "*****!!! finished" << endl;
@@ -716,25 +722,27 @@ class frontend_testgen {
     string test_file;
     batch_parallel_oracle oracle;
     int execute_batch_size;
+    int scan_scaledown_factor;
 
     frontend_testgen(int _init_n, int _test_n, sequence<double> _pos, int _bias,
-                     string initfile, string testfile, int batch_size)
+                     string initfile, string testfile, int batch_size, int scan_scaledown_factor)
         : init_n{_init_n},
           test_n{_test_n},
           pos{_pos},
           bias{_bias},
           init_file{initfile},
           test_file{testfile},
-          execute_batch_size{batch_size} {}
+          execute_batch_size{batch_size},
+          scan_scaledown_factor{scan_scaledown_factor} {}
 
     sequence<operation> generate_tasks(parlay::sequence<double>& possi, int n,
                                        bool zipf, double alpha, int bias) {
-        assert(pos.size() == OPERATION_NR_ITEMS);
-        test_generator tg(make_slice(possi), execute_batch_size);
+        assert(possi.size() == OPERATION_NR_ITEMS);
+        test_generator tg(make_slice(possi), execute_batch_size);  // [TU] second argument is not used
         auto ops = sequence<operation>(n);
-        if(pos[operation_t::scan_t] > 0)
+        if(possi[operation_t::scan_t] > 0)
             tg.fill_with_biased_ops(make_slice(ops), zipf, alpha, bias, oracle,
-                                    execute_batch_size / 100);
+                                    execute_batch_size / scan_scaledown_factor);
         else
             tg.fill_with_biased_ops(make_slice(ops), zipf, alpha, bias, oracle,
                                     execute_batch_size);
@@ -780,7 +788,7 @@ class frontend_testgen {
             if(alpha == 1.0) aalpha = 0.99;
             parlay::sequence<operation> ops;
             if (t == operation_t::scan_t) {
-                int expected_length = 100;
+                int expected_length = scan_scaledown_factor;
                 ops = generate_tasks(pos, test_n / expected_length, true, aalpha, 1.0);
             } else {
                 ops = generate_tasks(pos, test_n, true, aalpha, 1.0);
@@ -913,7 +921,7 @@ class frontend_testgen {
     }
 
     void generate_all_test() {
-        fs::path workload_directory = "/scratch/pim_workloads";
+        fs::path workload_directory = "./pim_workloads";
         fs::create_directories(workload_directory);
         if (this->init_file.length() == 0) {
             write_init_file((workload_directory/"init.in").c_str());
@@ -1041,6 +1049,10 @@ class driver {
             .help("init state")
             .default_value(false)
             .implicit_value(true);
+        program.add_argument("--scan_scaledown_factor")
+            .help("scaling factor to scaledown the batch size for scan query")
+            .default_value(100)
+            .scan<'i', int>();
 
         return program;
     }
@@ -1050,7 +1062,7 @@ class driver {
         init_io_managers();
     }
 
-    static void run(frontend& f, int init_batch_size, int test_batch_size) {
+    static void run(frontend& f, int init_batch_size, int test_batch_size, int scan_scaledown_factor) {
         pim_skip_list_drivers = new pim_skip_list[core::num_top_level_threads];
         pim_skip_list_drivers[0].init();
         
@@ -1059,7 +1071,7 @@ class driver {
             cpu_coverage_timer->reset();
             pim_coverage_timer->reset();
             core::execute(make_slice(init_ops), init_batch_size,
-                          init_batch_size, 1);
+                          init_batch_size, 1, scan_scaledown_factor);
         }
         total_communication = 0;
         total_actual_communication = 0;
@@ -1084,7 +1096,7 @@ class driver {
 #endif
 
             core::execute(make_slice(test_ops), test_batch_size,
-                          test_batch_size, core::num_top_level_threads);
+                          test_batch_size, core::num_top_level_threads, scan_scaledown_factor);
 
 #ifdef USE_PAPI
             papi_turn_counters(false);
@@ -1151,12 +1163,14 @@ class driver {
         int init_batch_size = program.get<int>("--init_batch_size");
         int test_batch_size = program.get<int>("--test_batch_size");
         int output_batch_size = program.get<int>("--output_batch_size");
+        int scan_scaledown_factor = program.get<int>("--scan_scaledown_factor");
 
         if (program.is_used("--generate_all_test_cases") == true) {
             cout << "start generating all tests" << endl;
             string init_file = program.get<string>("--generate_all_test_cases");
             frontend_testgen frontend(init_n, test_n, move(pos), bias,
-                                      init_file, "", output_batch_size);
+                                      init_file, "", output_batch_size,
+                                      scan_scaledown_factor);
             frontend.generate_all_test();
         } else if (files.size() > 0) {  // test from file
             assert(files.size() == 2);
@@ -1168,7 +1182,7 @@ class driver {
                 tn = ns[1];
             }
             frontend_by_file frontend(files[0], files[1], in, tn);
-            run(frontend, init_batch_size, test_batch_size);
+            run(frontend, init_batch_size, test_batch_size, scan_scaledown_factor);
         } else if (output_file.size() > 0) {  // print test file
             assert(output_file.size() == 2);
             printf("To generated file:\n");
@@ -1179,7 +1193,8 @@ class driver {
 
             frontend_testgen frontend(init_n, test_n, move(pos), bias,
                                       output_file[0], output_file[1],
-                                      output_batch_size);
+                                      output_batch_size,
+                                      1);  // scan_scaledown_factor does not affect individual-generation mode.
             frontend.write_file();
         } else {  // in memory test
             printf("Test with generated data:\n");
@@ -1194,7 +1209,7 @@ class driver {
             int test_n = ns[1];
             frontend_by_generation frontend(init_n, test_n, move(pos), bias,
                                             init_batch_size, test_batch_size);
-            run(frontend, init_batch_size, test_batch_size);
+            run(frontend, init_batch_size, test_batch_size, scan_scaledown_factor);
         }
 
         // print_all_timers(print_type::pt_full);

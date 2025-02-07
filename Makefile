@@ -31,6 +31,7 @@ __dirs := $(shell mkdir -p ${BUILDDIR})
 
 COMMON_FLAGS := -Wall -Wno-unused-function -Wextra -g -I${COMMON_DIR} -I${COMMON_LIB_DIR}
 HOST_LIB_FLAGS := -I${HOST_DIR} -isystem parlaylib/include -isystem argparse/include -Itimer_tree/include
+#HOST_FLAGS := ${COMMON_FLAGS} -std=c++17 -lpthread -O0 -g ${HOST_LIB_FLAGS} -I${HOST_LIB_DIR} `dpu-pkg-config --cflags --libs dpu` -DNR_TASKLETS=${NR_TASKLETS} -DNR_DPUS=${NR_DPUS}
 HOST_FLAGS := ${COMMON_FLAGS} -std=c++17 -lpthread -O3 ${HOST_LIB_FLAGS} -I${HOST_LIB_DIR} `dpu-pkg-config --cflags --libs dpu` -DNR_TASKLETS=${NR_TASKLETS} -DNR_DPUS=${NR_DPUS}
 DPU_FLAGS := ${COMMON_FLAGS} -I${DPU_DIR} -I${DPU_LIB_DIR} -O2 -DNR_TASKLETS=${NR_TASKLETS}
 

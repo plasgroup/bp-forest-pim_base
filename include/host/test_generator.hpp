@@ -131,7 +131,7 @@ void all_or_nothing_keys(int bias, slice<int64_t*, int64_t*> ids) {
 class test_generator {
    public:
     sequence<double> possibilities = sequence<double>(OPERATION_NR_ITEMS);
-    int batch_size;
+    //int batch_size;
 
     test_generator(slice<double*, double*> _pos, int _size) {
         assert(_pos[0] == 0.0);
@@ -140,7 +140,7 @@ class test_generator {
             possibilities[i] = possibilities[i - 1] + _pos[i];
         }
         assert(possibilities[OPERATION_NR_ITEMS - 1] == 1.0);
-        batch_size = _size;
+        //batch_size = _size;
     }
 
     void fill(operation& op, int64_t& k, int64_t& v, int64_t& in_key,
