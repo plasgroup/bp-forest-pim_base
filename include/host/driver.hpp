@@ -121,7 +121,7 @@ inline void write_ops_to_file(string file_name,
     close(fd);
 }
 
-bool Check_result = false;
+bool Check_result = true;
 
 template <typename Checker>
 auto read_op_file(string name, Checker checker) {
