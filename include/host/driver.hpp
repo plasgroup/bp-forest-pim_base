@@ -121,8 +121,6 @@ inline void write_ops_to_file(string file_name,
     close(fd);
 }
 
-bool Check_result = true;
-
 template <typename Checker>
 auto read_op_file(string name, Checker checker) {
     const char* filepath = name.c_str();
@@ -258,7 +256,7 @@ void scan(slice<scan_operation*, scan_operation*> ops, unique_lock<mutex>& mut, 
     time_start("scan");
     auto v1 = ds->scan(ops);
     time_end("scan");
-    if (Check_result) {
+    if (check_result) {
         int64_t length = ops.size();
         auto v2 = oracle.scan_size_batch(ops);
         bool correct = true;
