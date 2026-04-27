@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <string>
 #include <shared_mutex>
+#include <random>
 #include "fcntl.h"
 #include "oracle.hpp"
 #include "operation_def.hpp"
@@ -180,6 +181,14 @@ int num_wait_microsecond;
 int push_pull_limit_dynamic;
 
 shared_mutex op_mutex;
+
+double poisson_lambda = 0.0;
+uint64_t poisson_seed = 0xC0FFEE12345ULL;
+bool poisson_active = false;
+std::mt19937_64 poisson_rng;
+std::chrono::steady_clock::time_point prev_sample_time;
+size_t poisson_pos = 0;
+size_t outstanding = 0;
 
 void get(slice<get_operation*, get_operation*> ops, unique_lock<mutex>& mut, int tid = 0) {
     parlay::sequence<int64_t> ops_sequence;
@@ -404,11 +413,45 @@ mutex load_batch_mutex;
 
 bool load_one_batch(parlay::slice<operation*, operation*> ops,
                     int load_batch_size) {
-    if (T >= rounds) {
-        return false;
+    int l, r;
+    if (poisson_active) {
+        while (true) {
+            if (poisson_pos >= ops.size()) return false;
+            auto now = std::chrono::steady_clock::now();
+            double delta = std::chrono::duration<double>(now - prev_sample_time).count();
+            prev_sample_time = now;
+            size_t remaining = ops.size() - poisson_pos;
+            size_t new_arrivals = std::poisson_distribution<size_t>(
+                poisson_lambda * delta)(poisson_rng);
+            size_t room = remaining - outstanding;
+            size_t queued = (new_arrivals >= room) ? remaining : (outstanding + new_arrivals);
+            size_t k = std::min({queued, (size_t)load_batch_size, (size_t)MAX_BATCH_SIZE});
+            outstanding = queued - k;
+            if (k > 0) {
+                l = (int)poisson_pos;
+                r = l + (int)k;
+                poisson_pos = (size_t)r;
+                printf("batch_trace t_us=%lld size=%zu outstanding=%zu\n",
+                       (long long)std::chrono::duration_cast<std::chrono::microseconds>(
+                           now.time_since_epoch()).count(), k, outstanding);
+                break;
+            }
+            std::exponential_distribution<double> inter(poisson_lambda);
+            double w = inter(poisson_rng);
+            auto arrival = prev_sample_time +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                    std::chrono::duration<double>(w));
+            std::this_thread::sleep_until(arrival);
+            outstanding = 1;
+            prev_sample_time = arrival;
+        }
+    } else {
+        if (T >= rounds) {
+            return false;
+        }
+        l = T * load_batch_size;
+        r = min((T + 1) * load_batch_size, n);
     }
-    int l = T * load_batch_size;
-    int r = min((T + 1) * load_batch_size, n);
     int len = r - l;
 
     auto mixed_op_batch = ops.cut(l, r);
@@ -426,9 +469,11 @@ bool load_one_batch(parlay::slice<operation*, operation*> ops,
                 sums[j][i] = c[j];
             }
         });
+    size_t nblk = parlay::internal::num_blocks((size_t)len, _block_size);
     for (int j = 0; j < OPERATION_NR_ITEMS; j++) {
-        cnts[j] = parlay::scan_inplace(parlay::make_slice(sums[j]),
-                                       parlay::addm<size_t>());
+        cnts[j] = parlay::scan_inplace(
+            parlay::make_slice(sums[j].begin(), sums[j].begin() + nblk),
+            parlay::addm<size_t>());
     }
     parlay::internal::sliced_for(
         len, _block_size, [&](size_t i, size_t s, size_t e) {
@@ -476,13 +521,14 @@ bool load_one_batch(parlay::slice<operation*, operation*> ops,
     for (int j = 0; j < OPERATION_NR_ITEMS; j++) {
         op_count[j] += cnts[j];
     }
-    T++;
+    if (!poisson_active) T++;
     return true;
 }
 
 operation_t batch_ready(int execute_batch_size, int scan_batch_size) {
+    int threshold = poisson_active ? 1 : execute_batch_size;
     for (int j = 1; j < OPERATION_NR_ITEMS; j++) {
-        if (op_count[j] >= execute_batch_size && op_count[j] > 0) {
+        if (op_count[j] >= threshold && op_count[j] > 0) {
             return (operation_t)j;
         }
     }
@@ -519,7 +565,7 @@ void run_batch(operation_t op_type, unique_lock<mutex>& mut, int tid, int scan_b
             if (count - scan_start >= scan_batch) {
                 core::scan(parlay::make_slice(scan_ops + scan_start, scan_ops + scan_start + scan_batch), mut, tid);
                 scan_start += scan_batch;
-            } else if(count - scan_start > 1) {
+            } else if(count - scan_start > 0) {
                 parlay::parallel_for(0, count - scan_start, [&](size_t i) {
                     scan_ops[i] = scan_ops[i + scan_start];
                 });
@@ -558,12 +604,20 @@ bool finished() {
 }
 
 void execute(parlay::slice<operation*, operation*> ops, int load_batch_size,
-             int execute_batch_size, int threads, int scan_batch_size) {
+             int execute_batch_size, int threads, int scan_batch_size,
+             bool poisson_enabled = false) {
     printf("execute n=%lu batchsize=%d,%d\n", ops.size(), load_batch_size,
            execute_batch_size);
     ASSERT(threads <= num_top_level_threads);
     memset(op_count, 0, sizeof(op_count));
     init(ops, load_batch_size, execute_batch_size);
+    poisson_pos = 0;
+    outstanding = 0;
+    poisson_active = poisson_enabled && poisson_lambda > 0.0 && ops.size() > 0;
+    if (poisson_active) {
+        poisson_rng.seed(poisson_seed);
+        prev_sample_time = std::chrono::steady_clock::now();
+    }
     atomic<int> num_finished_threads = 0;
     parlay::parallel_for(
         0, threads,
@@ -1044,6 +1098,12 @@ class driver {
             .help("per-call DPU batch size for SCAN ops (default: --test_batch_size / 100)")
             .default_value(0)
             .scan<'i', int>();
+        program.add_argument("--poisson_lambda")
+            .help("--poisson_lambda [queries/sec, 0 disables]")
+            .default_value(0.0).scan<'g', double>();
+        program.add_argument("--poisson_seed")
+            .help("--poisson_seed [uint64 PRNG seed]")
+            .default_value(std::string("0xC0FFEE12345"));
 
         return program;
     }
@@ -1087,7 +1147,7 @@ class driver {
 #endif
 
             core::execute(make_slice(test_ops), test_batch_size,
-                          test_batch_size, core::num_top_level_threads, scan_batch_size);
+                          test_batch_size, core::num_top_level_threads, scan_batch_size, true);
 
 #ifdef USE_PAPI
             papi_turn_counters(false);
@@ -1158,6 +1218,8 @@ class driver {
                                   ? program.get<int>("--scan_batch_size")
                                   : test_batch_size / 100;
         assert(scan_batch_size > 0);
+        core::poisson_lambda = program.get<double>("--poisson_lambda");
+        core::poisson_seed = std::stoull(program.get<std::string>("--poisson_seed"), nullptr, 0);
 
         if (program.is_used("--generate_all_test_cases") == true) {
             cout << "start generating all tests" << endl;
