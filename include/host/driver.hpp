@@ -179,6 +179,7 @@ atomic<int> batch_number = 0;
 int num_top_level_threads;
 int num_wait_microsecond;
 int push_pull_limit_dynamic;
+int warmup_batches = 0;
 
 shared_mutex op_mutex;
 
@@ -1104,6 +1105,10 @@ class driver {
         program.add_argument("--poisson_seed")
             .help("--poisson_seed [uint64 PRNG seed]")
             .default_value(std::string("0xC0FFEE12345"));
+        program.add_argument("--warmup_batches")
+            .help("--warmup_batches [test batches run before the timers are reset]")
+            .default_value(0)
+            .scan<'i', int>();
 
         return program;
     }
@@ -1135,6 +1140,12 @@ class driver {
         reset_all_timers();
         {
             auto test_ops = f.test_tasks();
+            size_t warmup = std::min(test_ops.size(), (size_t)core::warmup_batches * test_batch_size);
+            if (warmup > 0) {
+                core::execute(make_slice(test_ops).cut(0, warmup), test_batch_size,
+                              test_batch_size, core::num_top_level_threads, scan_batch_size, true);
+                reset_all_timers();
+            }
             cpu_coverage_timer->reset();
             pim_coverage_timer->reset();
 
@@ -1146,7 +1157,7 @@ class driver {
             papi_wait_counters(true, parlay::num_workers());
 #endif
 
-            core::execute(make_slice(test_ops), test_batch_size,
+            core::execute(make_slice(test_ops).cut(warmup, test_ops.size()), test_batch_size,
                           test_batch_size, core::num_top_level_threads, scan_batch_size, true);
 
 #ifdef USE_PAPI
@@ -1220,6 +1231,7 @@ class driver {
         assert(scan_batch_size > 0);
         core::poisson_lambda = program.get<double>("--poisson_lambda");
         core::poisson_seed = std::stoull(program.get<std::string>("--poisson_seed"), nullptr, 0);
+        core::warmup_batches = program.get<int>("--warmup_batches");
 
         if (program.is_used("--generate_all_test_cases") == true) {
             cout << "start generating all tests" << endl;
