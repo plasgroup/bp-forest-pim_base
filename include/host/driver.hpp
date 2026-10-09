@@ -180,6 +180,20 @@ int num_top_level_threads;
 int num_wait_microsecond;
 int push_pull_limit_dynamic;
 int warmup_batches = 0;
+bool split_ops_upfront = false;
+parlay::sequence<int64_t> split_ops;
+operation* split_from = nullptr;
+
+void split_upfront(parlay::slice<operation*, operation*> ops) {
+    if (parlay::any_of(ops, [&](const operation& op) { return op.type != ops[0].type; })) {
+        fprintf(stderr, "--split_ops_upfront takes test operations of one type\n");
+        exit(EXIT_FAILURE);
+    }
+    size_t w = ops[0].type == insert_t ? 2 : 1;
+    split_ops = parlay::sequence<int64_t>::uninitialized(ops.size() * w);
+    split_from = ops.begin();
+    parlay::parallel_for(0, ops.size(), [&](size_t i) { memcpy(&split_ops[i * w], &ops[i].tsk, w * sizeof(int64_t)); });
+}
 
 shared_mutex op_mutex;
 
@@ -454,6 +468,21 @@ bool load_one_batch(parlay::slice<operation*, operation*> ops,
         r = min((T + 1) * load_batch_size, n);
     }
     int len = r - l;
+    if (split_from) {
+        int x = ops[l].type;
+        int64_t* p = &split_ops[(&ops[l] - split_from) * (x == insert_t ? 2 : 1)];
+        if (op_count[x] == 0) {
+            switch (x) {
+                case get_t: get_ops = (get_operation*)p; break;
+                case predecessor_t: predecessor_ops = (predecessor_operation*)p; break;
+                case insert_t: insert_ops = (insert_operation*)p; break;
+                case remove_t: remove_ops = (remove_operation*)p; break;
+            }
+        }
+        op_count[x] += len;
+        if (!poisson_active) T++;
+        return true;
+    }
 
     auto mixed_op_batch = ops.cut(l, r);
 
@@ -1109,6 +1138,10 @@ class driver {
             .help("--warmup_batches [test batches run before the timers are reset]")
             .default_value(0)
             .scan<'i', int>();
+        program.add_argument("--split_ops_upfront")
+            .help("split the test operations, all of one type, into the per-type arrays before running them")
+            .default_value(false)
+            .implicit_value(true);
 
         return program;
     }
@@ -1140,6 +1173,7 @@ class driver {
         reset_all_timers();
         {
             auto test_ops = f.test_tasks();
+            if (core::split_ops_upfront) core::split_upfront(make_slice(test_ops));
             size_t warmup = std::min(test_ops.size(), (size_t)core::warmup_batches * test_batch_size);
             if (warmup > 0) {
                 core::execute(make_slice(test_ops).cut(0, warmup), test_batch_size,
@@ -1232,6 +1266,7 @@ class driver {
         core::poisson_lambda = program.get<double>("--poisson_lambda");
         core::poisson_seed = std::stoull(program.get<std::string>("--poisson_seed"), nullptr, 0);
         core::warmup_batches = program.get<int>("--warmup_batches");
+        core::split_ops_upfront = program.get<bool>("--split_ops_upfront");
 
         if (program.is_used("--generate_all_test_cases") == true) {
             cout << "start generating all tests" << endl;

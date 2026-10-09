@@ -17,7 +17,7 @@ const int OPERATION_NR_ITEMS = 7;
 int op_count[OPERATION_NR_ITEMS];
 struct get_operation {
     int64_t key;
-} get_ops[MAX_BATCH_SIZE];
+} *get_ops = new get_operation[MAX_BATCH_SIZE];
 
 struct update_operation {
     int64_t key;
@@ -26,7 +26,7 @@ struct update_operation {
 
 struct predecessor_operation {
     int64_t key;
-} predecessor_ops[MAX_BATCH_SIZE];
+} *predecessor_ops = new predecessor_operation[MAX_BATCH_SIZE];
 
 struct scan_operation {
     int64_t lkey;
@@ -36,11 +36,11 @@ struct scan_operation {
 struct insert_operation {
     int64_t key;
     int64_t value;
-} insert_ops[MAX_BATCH_SIZE];
+} *insert_ops = new insert_operation[MAX_BATCH_SIZE];
 
 struct remove_operation {
     int64_t key;
-} remove_ops[MAX_BATCH_SIZE];
+} *remove_ops = new remove_operation[MAX_BATCH_SIZE];
 
 struct operation {
     union {
