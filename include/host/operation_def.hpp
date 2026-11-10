@@ -31,7 +31,7 @@ struct predecessor_operation {
 struct scan_operation {
     int64_t lkey;
     int64_t rkey;
-} scan_ops[MAX_BATCH_SIZE];
+} *scan_ops = new scan_operation[MAX_BATCH_SIZE];
 
 struct insert_operation {
     int64_t key;

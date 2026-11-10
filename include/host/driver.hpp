@@ -189,7 +189,7 @@ void split_upfront(parlay::slice<operation*, operation*> ops) {
         fprintf(stderr, "--split_ops_upfront takes test operations of one type\n");
         exit(EXIT_FAILURE);
     }
-    size_t w = ops[0].type == insert_t ? 2 : 1;
+    size_t w = ops[0].type == insert_t || ops[0].type == scan_t ? 2 : 1;
     split_ops = parlay::sequence<int64_t>::uninitialized(ops.size() * w);
     split_from = ops.begin();
     parlay::parallel_for(0, ops.size(), [&](size_t i) { memcpy(&split_ops[i * w], &ops[i].tsk, w * sizeof(int64_t)); });
@@ -269,10 +269,11 @@ void scan(slice<scan_operation*, scan_operation*> ops, unique_lock<mutex>& mut, 
                 ops[i].rkey = ops[i].lkey + range_size;
         });
     }
-    parfor_wrap(0, ops.size(), [&](size_t i) {
-        if (ops[i].lkey >= ops[i].rkey)
-            ops[i].rkey = ops[i].lkey + 1;
-    });
+    parlay::sequence<scan_operation> kept;
+    if (parlay::any_of(ops, [](const scan_operation& op) { return op.rkey < op.lkey; })) {
+        kept = parlay::filter(ops, [](const scan_operation& op) { return op.lkey <= op.rkey; });
+        ops = parlay::make_slice(kept);
+    }
     // slice<scan_operation*, scan_operation*> ops2 = ops;
     mut.unlock();
     shared_lock rLock(op_mutex);
@@ -470,11 +471,12 @@ bool load_one_batch(parlay::slice<operation*, operation*> ops,
     int len = r - l;
     if (split_from) {
         int x = ops[l].type;
-        int64_t* p = &split_ops[(&ops[l] - split_from) * (x == insert_t ? 2 : 1)];
+        int64_t* p = &split_ops[(&ops[l] - split_from) * (x == insert_t || x == scan_t ? 2 : 1)];
         if (op_count[x] == 0) {
             switch (x) {
                 case get_t: get_ops = (get_operation*)p; break;
                 case predecessor_t: predecessor_ops = (predecessor_operation*)p; break;
+                case scan_t: scan_ops = (scan_operation*)p; break;
                 case insert_t: insert_ops = (insert_operation*)p; break;
                 case remove_t: remove_ops = (remove_operation*)p; break;
             }
@@ -593,8 +595,9 @@ void run_batch(operation_t op_type, unique_lock<mutex>& mut, int tid, int scan_b
         case operation_t::scan_t: {
             int scan_batch = scan_batch_limit;
             if (count - scan_start >= scan_batch) {
-                core::scan(parlay::make_slice(scan_ops + scan_start, scan_ops + scan_start + scan_batch), mut, tid);
-                scan_start += scan_batch;
+                int start = scan_start;
+                scan_start += scan_batch;  // before core::scan unlocks mut, or another thread scans the same ops
+                core::scan(parlay::make_slice(scan_ops + start, scan_ops + start + scan_batch), mut, tid);
             } else if(count - scan_start > 0) {
                 parlay::parallel_for(0, count - scan_start, [&](size_t i) {
                     scan_ops[i] = scan_ops[i + scan_start];
